@@ -18,8 +18,8 @@ import numpy as np
 from manim import *
 
 # Set random seed for reproducibility
-tf.random.set_seed(42)
-np.random.seed(42)
+# tf.random.set_seed(42)
+# np.random.seed(42)
 
 
 class SpinSystem:
@@ -82,12 +82,12 @@ class SpinSystem:
 
 
 class SpinSystemVisualization(Scene):
-    """Manim scene to visualize the SpinSystem evolution."""
+    """Manim scene to visualize the SpinSystem evolution with color-coded nodes."""
 
     def construct(self):
         # System parameters
-        N = 12  # Number of spins (smaller for visualization)
-        steps = 10  # Number of optimization steps
+        N = 25  # Number of spins (smaller for visualization)
+        steps = 200  # Number of optimization steps
 
         # Create spin system
         system = SpinSystem(N)
@@ -101,7 +101,6 @@ class SpinSystemVisualization(Scene):
         nodes = VGroup()
         node_positions = []
         node_circles = []
-        node_texts = []
 
         for i in range(N):
             angle = 2 * PI * i / N
@@ -110,18 +109,21 @@ class SpinSystemVisualization(Scene):
             position = np.array([x, y, 0])
             node_positions.append(position)
 
-            # Circle
-            circle = Circle(radius=2/N, color=WHITE, fill_opacity=0.8)
+            # Circle with color based on initial value
+            value = system.sigma.numpy()[i]
+            color = RED if value > 0 else BLUE
+            intensity = abs(value)  # Use absolute value for intensity
+
+            circle = Circle(
+                radius=2/N,
+                color=WHITE,
+                stroke_width=0.1,
+                fill_color=color,
+                fill_opacity=intensity * 0.8  # Scale opacity by value magnitude
+            )
             circle.move_to(position)
             node_circles.append(circle)
-
-            # Initial value as Text
-            value = system.sigma.numpy()[i]
-            text = Text(f"{value:.2f}", font_size=100/N, color=BLACK)
-            text.move_to(position)
-            node_texts.append(text)
-
-            nodes.add(circle, text)
+            nodes.add(circle)
 
         # Connections
         connections = VGroup()
@@ -133,7 +135,7 @@ class SpinSystemVisualization(Scene):
                     line = Line(
                         node_positions[i],
                         node_positions[j],
-                        stroke_width=2,
+                        stroke_width=0.3,
                         color=color,
                         stroke_opacity=opacity,
                     )
@@ -163,19 +165,22 @@ class SpinSystemVisualization(Scene):
 
             animations = []
 
-            # Update node values with ReplacementTransform
-            new_node_texts = []
+            # Update node colors based on new values
             for i in range(N):
                 value = system.sigma.numpy()[i]
-                new_text = Text(f"{value:.2f}", font_size=100/N, color=BLACK)
-                new_text.move_to(node_positions[i])
-                animations.append(ReplacementTransform(
-                    node_texts[i], new_text))
-                new_node_texts.append(new_text)
-            node_texts = new_node_texts
+                color = RED if value > 0 else BLUE
+                intensity = abs(value)
+
+                # Create animation to change fill color and opacity
+                animations.append(
+                    node_circles[i].animate.set_fill(
+                        color=color,
+                        opacity=intensity * 0.8
+                    )
+                )
 
             # Update energy text
-            new_energy_text = Text(f"Energy: {energy:.4f}", font_size=24)
+            new_energy_text = Text(f"Energy: {energy:.2f}", font_size=24)
             new_energy_text.next_to(title, DOWN, buff=0.3)
             animations.append(ReplacementTransform(
                 energy_text, new_energy_text))
@@ -195,9 +200,9 @@ class SpinSystemVisualization(Scene):
 
 if __name__ == "__main__":
     # For testing without Manim
-    system = SpinSystem(3)
+    system = SpinSystem(100)
     print("Initial energy:", system.hamiltonian().numpy())
 
-    for step in range(5):
+    for step in range(1000):
         energy = system.optimize_step()
         print(f"Step {step}: Energy = {energy:.4f}")
