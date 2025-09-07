@@ -27,28 +27,33 @@ class SpinSystem:
                  D: int,
                  L: int,
                  J: Optional[Union[tf.Tensor, np.ndarray]] = None,
-                 keep_history: bool = False):
+                 keep_history: bool = False,
+                 spherical: bool = True,          # enable/disable spherical constraint
+                 # use Ising spins (±1) instead of continuous
+                 ising: bool = False):
         self.D = D
         self.L = L
         self.shape = [L] * D
         self.N = L**D
         self.history = HistoryLogger(keep_history)
+        self.spherical = spherical
+        self.ising = ising
 
         if J is None:
             # J ~ [L, L, ..., L] (2*D times)
             J = tf.random.normal(self.shape + self.shape, stddev=1.0)
-            # Make J symmetric under exchange of left/right indices
             axes = list(range(2*D))
             perm = axes[D:] + axes[:D]   # swap halves
             J = 0.5 * (J + tf.transpose(J, perm=perm))
-            # Zero out self-couplings
             mask = 1.0 - tf.eye(self.N)
             J = tf.reshape(J, (self.N, self.N)) * mask
             J = tf.reshape(J, self.shape + self.shape)
         else:
             J = tf.convert_to_tensor(J, dtype=tf.float32)
-            if J.shape != tuple(self.shape + self.shape):
-                raise ValueError(f"J must be shape {self.shape + self.shape}")
+            if tuple(J.shape) != tuple(self.shape + self.shape):
+                raise ValueError(
+                    f"J must be shape {self.shape + self.shape}, got {J.shape}"
+                )
         self.J = J
 
         self.sigma = tf.Variable(self._initialize_spins(), trainable=True)
@@ -56,11 +61,21 @@ class SpinSystem:
         self._log_initial_state()
 
     def _initialize_spins(self) -> tf.Tensor:
-        sigma = tf.random.normal(self.shape)
-        return self._apply_spherical_constraint(sigma)
+        if self.ising:
+            # Random ±1
+            sigma = tf.random.uniform(
+                self.shape, minval=0, maxval=2, dtype=tf.int32)
+            sigma = tf.cast(2 * sigma - 1, tf.float32)
+        else:
+            # Continuous spins
+            sigma = tf.random.normal(self.shape)
+            if self.spherical:
+                sigma = self._apply_spherical_constraint(sigma)
+        return sigma
 
     def _apply_spherical_constraint(self, sigma: tf.Tensor) -> tf.Tensor:
-        # Normalize so that sum(sigma^2) = N
+        if not self.spherical:
+            return sigma
         return tf.sqrt(tf.cast(self.N, tf.float32)) * tf.math.l2_normalize(sigma)
 
     def _compute_energy(self, sigma: tf.Tensor) -> tf.Tensor:
@@ -96,40 +111,53 @@ class SpinSystem:
         self._log_state(self.sigma, self.energy)
 
     def metropolis_step(self, beta: float, theta_max: float = 0.1) -> bool:
-        # Pick two random spins in D-dimensional lattice
-        coords1 = [np.random.randint(0, self.L) for _ in range(self.D)]
-        coords2 = [np.random.randint(0, self.L) for _ in range(self.D)]
-        while coords1 == coords2:
+        if self.ising:
+            # ---- Ising flip ----
+            coords = [np.random.randint(0, self.L) for _ in range(self.D)]
+
+            sigma_val = tf.gather_nd(self.sigma, [coords])
+            new_val = -sigma_val  # flip
+
+            next_sigma = tf.tensor_scatter_nd_update(
+                self.sigma,
+                indices=[coords],
+                updates=new_val
+            )
+        else:
+            # ---- Continuous rotation ----
+            coords1 = [np.random.randint(0, self.L) for _ in range(self.D)]
             coords2 = [np.random.randint(0, self.L) for _ in range(self.D)]
+            while coords1 == coords2:
+                coords2 = [np.random.randint(0, self.L) for _ in range(self.D)]
 
-        theta = tf.random.uniform([], -theta_max, theta_max)
-        cos_t, sin_t = tf.cos(theta), tf.sin(theta)
+            theta = tf.random.uniform([], -theta_max, theta_max)
+            cos_t, sin_t = tf.cos(theta), tf.sin(theta)
 
-        sigma_i = tf.gather_nd(self.sigma, [coords1])
-        sigma_j = tf.gather_nd(self.sigma, [coords2])
+            sigma_i = tf.gather_nd(self.sigma, [coords1])
+            sigma_j = tf.gather_nd(self.sigma, [coords2])
 
-        # Rotate
-        new_i = cos_t * sigma_i - sin_t * sigma_j
-        new_j = sin_t * sigma_i + cos_t * sigma_j
+            new_i = cos_t * sigma_i - sin_t * sigma_j
+            new_j = sin_t * sigma_i + cos_t * sigma_j
 
-        # Update spins one by one, as scalars
-        next_sigma = tf.tensor_scatter_nd_update(
-            self.sigma,
-            indices=[coords1],
-            updates=tf.convert_to_tensor(new_i, dtype=self.sigma.dtype)
-        )
-        next_sigma = tf.tensor_scatter_nd_update(
-            next_sigma,
-            indices=[coords2],
-            updates=tf.convert_to_tensor(new_j, dtype=self.sigma.dtype)
-        )
+            next_sigma = tf.tensor_scatter_nd_update(
+                self.sigma,
+                indices=[coords1],
+                updates=new_i
+            )
+            next_sigma = tf.tensor_scatter_nd_update(
+                next_sigma,
+                indices=[coords2],
+                updates=new_j
+            )
 
-        # Metropolis acceptance
+        # --- Metropolis acceptance ---
+        if self.spherical and not self.ising:
+            next_sigma = self._apply_spherical_constraint(next_sigma)
+
         next_energy = self._compute_energy(next_sigma)
         dE = next_energy - self.energy
 
         if dE < 0 or tf.random.uniform([]) < tf.exp(-beta * dE):
-            # self.sigma.assign(self._apply_spherical_constraint(next_sigma))
             self.sigma.assign(next_sigma)
             self.energy = next_energy
             self._log_state(self.sigma, self.energy,
