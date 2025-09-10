@@ -30,7 +30,8 @@ class SpinSystem:
                  keep_history: bool = False,
                  spherical: bool = True,          # enable/disable spherical constraint
                  # use Ising spins (±1) instead of continuous
-                 ising: bool = False):
+                 ising: bool = False,
+                 bias: float = 0.5):              # bias strength
         self.D = D
         self.L = L
         self.shape = [L] * D
@@ -38,6 +39,7 @@ class SpinSystem:
         self.history = HistoryLogger(keep_history)
         self.spherical = spherical
         self.ising = ising
+        self.bias = bias  # store bias
 
         if J is None:
             # J ~ [L, L, ..., L] (2*D times)
@@ -62,13 +64,14 @@ class SpinSystem:
 
     def _initialize_spins(self) -> tf.Tensor:
         if self.ising:
-            # Random ±1
-            sigma = tf.random.uniform(
-                self.shape, minval=0, maxval=2, dtype=tf.int32)
-            sigma = tf.cast(2 * sigma - 1, tf.float32)
+            # Probability of spin being +1 is shifted by bias
+            # bias > 0 favors +1, bias < 0 favors -1
+            p_up = 0.5 + 0.5 * tf.tanh(self.bias)  # keeps it in [0,1]
+            sigma = tf.cast(tf.random.uniform(self.shape) < p_up, tf.float32)
+            sigma = 2 * sigma - 1
         else:
-            # Continuous spins
-            sigma = tf.random.normal(self.shape)
+            # Continuous spins with mean bias
+            sigma = tf.random.normal(self.shape, mean=self.bias, stddev=1.0)
             if self.spherical:
                 sigma = self._apply_spherical_constraint(sigma)
         return sigma
@@ -88,7 +91,28 @@ class SpinSystem:
         left = letters[:ndim]
         right = letters[ndim:2*ndim]
         einsum_str = f"{left},{left+right},{right}->"
-        return -tf.einsum(einsum_str, sigma, self.J, sigma)
+        return -0.5*tf.einsum(einsum_str, sigma, self.J, sigma)  # O(N^{2^N})
+
+    def _compute_energy_delta(self, coords: list, new_vals: tf.Tensor) -> tf.Tensor:
+        # Flatten spins for indexing
+        sigma_flat = tf.reshape(self.sigma, [self.N])
+        J_flat = tf.reshape(self.J, (self.N, self.N))
+
+        # Convert multi-d coords into flat indices
+        flat_indices = [np.ravel_multi_index(c, self.shape) for c in coords]
+
+        dE = 0.0
+        for idx, new_val in zip(flat_indices, tf.unstack(new_vals)):
+            old_val = sigma_flat[idx]
+            delta_sigma = new_val - old_val
+
+            # Contribution from coupling with all other spins
+            interaction = tf.reduce_sum(J_flat[idx, :] * sigma_flat)
+
+            dE += -delta_sigma * interaction - 0.5 * \
+                J_flat[idx, idx] * (new_val**2 - old_val**2)
+
+        return dE
 
     def _compute_magnetization(self, sigma: tf.Tensor) -> tf.Tensor:
         return tf.reduce_mean(sigma)
@@ -154,29 +178,46 @@ class SpinSystem:
         if self.spherical and not self.ising:
             next_sigma = self._apply_spherical_constraint(next_sigma)
 
-        next_energy = self._compute_energy(next_sigma)
-        dE = next_energy - self.energy
+        # next_energy = self._compute_energy(next_sigma)
+        # dE = next_energy - self.energy
+
+        dE = self._compute_energy_delta(
+            coords=[coords1, coords2] if not self.ising else [coords],
+            new_vals=tf.stack(
+                [new_i, new_j]) if not self.ising else tf.stack([new_val])
+        )
 
         if dE < 0 or tf.random.uniform([]) < tf.exp(-beta * dE):
             self.sigma.assign(next_sigma)
-            self.energy = next_energy
-            self._log_state(self.sigma, self.energy,
+            self.energy = self.energy + dE
+            self._log_state(self.sigma, energy=self.energy,
                             accepted=True, dE=dE.numpy())
             return True
 
-        self.history.log(accepted=False, dE=dE.numpy(), energy=self.energy)
+        self.history.log(accepted=False, dE=dE.numpy())
         return False
 
-    def metropolis_sweep(self, beta: float, steps: Optional[int] = None,
-                         theta_max: float = 0.1) -> float:
-        if steps is None:
+    def metropolis_sweep(self, beta: float, steps: Optional[int] = None, accepted_steps: Optional[int] = None, theta_max: float = 0.1) -> float:
+        if steps is None and accepted_steps is None:
             steps = self.L
 
-        accepted = sum(self.metropolis_step(beta, theta_max)
-                       for _ in range(steps))
-        acceptance_rate = accepted / steps
+        accepted = 0
+        attempted = 0
+
+        if steps is not None:
+            for _ in range(steps):
+                accepted += self.metropolis_step(beta, theta_max)
+            attempted = steps
+
+        else:
+            while accepted < accepted_steps:
+                accepted += self.metropolis_step(beta, theta_max)
+                attempted += 1
+
+        acceptance_rate = accepted / attempted if attempted > 0 else 0.0
         print(
-            f"Metropolis sweep: {accepted}/{steps} accepted ({acceptance_rate:.2%})")
+            f"Metropolis sweep: {accepted}/{attempted} accepted ({acceptance_rate:.2%})"
+        )
         return acceptance_rate
 
     def optimize_metropolis(self, beta: float, sweeps: int = 100,
