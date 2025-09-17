@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from typing import Union, Optional, Callable, Tuple
+from typing import Union, Optional, Callable, Tuple, Literal
 
 
 class SpinSystem(tf.Module):
@@ -11,19 +11,19 @@ class SpinSystem(tf.Module):
         interaction_matrix: Union[tf.Tensor, np.ndarray],
         initial_spin_state: Optional[Union[tf.Tensor, np.ndarray]] = None,
         external_field: Optional[Union[tf.Tensor, np.ndarray]] = None,
-        ising: bool = True,
+        model: Literal["ising", "spherical", "z2_gauge"] = "ising",
         spherical_constraint: bool = False,
         initial_magnetization: float = 0.5,
     ) -> None:
 
-        assert (
-            ising != spherical_constraint), "Ising spins can't have Spherical Constraint applied to them!"
+        assert not (model != "spherical" and spherical_constraint), \
+            "Spherical constraint can only be applied to spherical model!"
 
         self.lattice_dim = lattice_dim
         self.lattice_length = lattice_length
         self.shape = [lattice_length] * lattice_dim
         self.number_spins = tf.cast(lattice_length ** lattice_dim, tf.float32)
-        self.ising = ising
+        self.model = model
         self.spherical_contraint = spherical_constraint
         self.initial_magnetization = initial_magnetization
 
@@ -88,17 +88,19 @@ class SpinSystem(tf.Module):
         return tf.sqrt(self.number_spins) * tf.math.l2_normalize(spin_state)
 
     def _initialize_spins_state(self) -> tf.Tensor:
-        if self.ising:
+        if self.model == "ising":
             p_up = 0.5 + 0.5 * tf.tanh(self.initial_magnetization)
             spin_state = tf.cast(tf.random.uniform(
                 self.shape) < p_up, tf.float32)
             spin_state = 2 * spin_state - 1
-        else:
+        elif self.model == "spherical":
             # TODO: We could implement an argument that enables a different initial distribution for spins
             spin_state = tf.random.normal(
                 self.shape, mean=self.initial_magnetization, stddev=1.0)
             if self.spherical_contraint:
                 spin_state = self._apply_spherical_constraint(spin_state)
+        elif self.model == "z2_gauge":
+            raise NotImplementedError("Z2 gauge model not implemented yet")
         return spin_state
 
     @tf.function
@@ -108,6 +110,9 @@ class SpinSystem(tf.Module):
         interaction_matrix: Optional[tf.Tensor] = None,
         external_field: Optional[tf.Tensor] = None,
     ) -> tf.Tensor:
+
+        assert self.model != "z2_gauge", "Can not compute pairwise energy for Z2 gauge model"
+
         if spin_state is None:
             spin_state = self.spin_state
         if interaction_matrix is None:
@@ -195,10 +200,12 @@ class SpinSystem(tf.Module):
     @tf.function
     def _disturb_state(self, num_disturb: Optional[tf.Tensor], theta_max: Optional[tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
 
-        if self.ising:
+        if self.model == "ising":
             new_spin_flat = self.flip_spins(num_disturb)
-        else:
+        elif self.model == "spherical":
             new_spin_flat = self.rotate_spins(num_disturb, theta_max)
+        elif self.model == "z2_gauge":
+            raise NotImplementedError("")
 
         next_spin_state = tf.reshape(new_spin_flat, self.spin_state.shape)
 
