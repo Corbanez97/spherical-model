@@ -24,7 +24,7 @@ class SpinSystem(tf.Module):
         self.shape = [lattice_length] * lattice_dim
         self.number_spins = tf.cast(lattice_length ** lattice_dim, tf.float32)
         self.model = model
-        self.spherical_contraint = spherical_constraint
+        self.spherical_constraint = spherical_constraint
         self.initial_magnetization = initial_magnetization
 
         self.interaction_matrix = self._validate_tensor_shape(
@@ -97,7 +97,7 @@ class SpinSystem(tf.Module):
             # TODO: We could implement an argument that enables a different initial distribution for spins
             spin_state = tf.random.normal(
                 self.shape, mean=self.initial_magnetization, stddev=1.0)
-            if self.spherical_contraint:
+            if self.spherical_constraint:
                 spin_state = self._apply_spherical_constraint(spin_state)
         elif self.model == "z2_gauge":
             raise NotImplementedError("Z2 gauge model not implemented yet")
@@ -258,7 +258,7 @@ class SpinSystem(tf.Module):
 
         next_spin_state = tf.reshape(new_spin_flat, self.spin_state.shape)
 
-        if self.spherical_contraint:
+        if self.spherical_constraint:
             next_spin_state = self._apply_spherical_constraint(next_spin_state)
 
         return next_spin_state, energy_delta
