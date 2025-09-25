@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from typing import Union, Optional, Callable, Tuple, Literal
+from typing import Union, Optional, Callable, Tuple, Literal, Dict
 
 
 class SpinSystem(tf.Module):
@@ -103,6 +103,8 @@ class SpinSystem(tf.Module):
             raise NotImplementedError("Z2 gauge model not implemented yet")
         return spin_state
 
+    # TODO: Compute pairwise energy delta
+
     @tf.function
     def compute_pairwise_energy(
         self,
@@ -132,6 +134,8 @@ class SpinSystem(tf.Module):
         field_term = - external_field_flat @ tf.transpose(spin_state_flat)
 
         return tf.squeeze(pairwise + field_term)
+
+    # TODO: Compute the magnetization susceptibility as the variance of the magnetization. I need to first use a populational method to compute the mag
 
     @tf.function
     def compute_magnetization(self, spin_state: Optional[tf.Tensor] = None) -> tf.Tensor:
@@ -241,17 +245,21 @@ class SpinSystem(tf.Module):
         num_disturb: Optional[tf.Tensor] = 1,
         theta_max: Optional[tf.Tensor] = None,
         sweep_length: int = 100,
+        measurement_granularity: int = 100,
         track_spins: bool = True,
         track_energy: bool = True,
         track_magnetization: bool = True,
-    ):
+    ) -> Dict:
         def make_array(track, size):
+            # This is bad because the code tries to access a tensor even if I don't want to track it...
             return tf.TensorArray(dtype=tf.float32, size=size) if track else tf.TensorArray(dtype=tf.float32, size=0)
 
-        spin_evolution = make_array(track_spins, sweep_length + 1)
-        energy_evolution = make_array(track_energy, sweep_length + 1)
+        spin_evolution = make_array(
+            track_spins, int(round(sweep_length/measurement_granularity)) + 1)
+        energy_evolution = make_array(
+            track_energy, int(round(sweep_length/measurement_granularity)) + 1)
         magnetization_evolution = make_array(
-            track_magnetization, sweep_length + 1)
+            track_magnetization, int(round(sweep_length/measurement_granularity)) + 1)
 
         if track_spins:
             spin_evolution = spin_evolution.write(0, self.spin_state)
@@ -265,14 +273,17 @@ class SpinSystem(tf.Module):
         def body(i, spin_evolution, energy_evolution, magnetization_evolution):
             _ = self.metropolis_step(beta, num_disturb, theta_max)
 
-            if track_spins:
-                spin_evolution = spin_evolution.write(i + 1, self.spin_state)
-            if track_energy:
-                energy_evolution = energy_evolution.write(
-                    i + 1, self.compute_pairwise_energy())
-            if track_magnetization:
-                magnetization_evolution = magnetization_evolution.write(
-                    i + 1, self.compute_magnetization())
+            if i % measurement_granularity == 0:
+                j = int(i/measurement_granularity)
+                if track_spins:
+                    spin_evolution = spin_evolution.write(
+                        j + 1, self.spin_state)
+                if track_energy:
+                    energy_evolution = energy_evolution.write(
+                        j + 1, self.compute_pairwise_energy())
+                if track_magnetization:
+                    magnetization_evolution = magnetization_evolution.write(
+                        j + 1, self.compute_magnetization())
 
             return i + 1, spin_evolution, energy_evolution, magnetization_evolution
 
@@ -293,6 +304,8 @@ class SpinSystem(tf.Module):
             result["magnetization_evolution"] = magnetization_evolution.stack()
 
         return result
+
+    # TODO: Refeed the previous spin_state
 
     @tf.function
     def multi_temperature_sweep(
