@@ -103,8 +103,6 @@ class SpinSystem(tf.Module):
             raise NotImplementedError("Z2 gauge model not implemented yet")
         return spin_state
 
-    # TODO: Compute pairwise energy delta
-
     @tf.function
     def compute_pairwise_energy(
         self,
@@ -135,6 +133,45 @@ class SpinSystem(tf.Module):
 
         return tf.squeeze(pairwise + field_term)
 
+    @tf.function
+    def _compute_pairwise_energy_delta(
+        self,
+        spin_flat: tf.Tensor,
+        updated_spin_flat: tf.Tensor,
+        disturbed_idx: tf.Tensor,
+    ) -> tf.Tensor:
+
+        # \Delta \sigma = \sigma_new - \sigma_old
+        delta_sigma = tf.gather(updated_spin_flat - spin_flat, disturbed_idx)
+
+        interaction_matrix_flat = tf.reshape(
+            self.interaction_matrix, (self.number_spins, self.number_spins))
+
+        # local fields h_j = \sum_i J_ij \sigma_i
+        h = tf.linalg.matvec(interaction_matrix_flat, spin_flat)
+
+        # interaction contributions
+        # - \sum_j \Delta \sigma_j h_j
+        term1 = -tf.reduce_sum(delta_sigma * tf.gather(h, disturbed_idx))
+
+        # -1/2 \sum_{i,j \in \text{disturbed spins}} J_ij \Delta \sigma_i \Delta \sigma_j
+        J_sub = tf.gather(
+            tf.gather(interaction_matrix_flat, disturbed_idx, axis=0),
+            disturbed_idx,
+            axis=1,
+        )
+        term2 = -0.5 * tf.tensordot(
+            delta_sigma, tf.linalg.matvec(J_sub, delta_sigma), axes=1
+        )
+
+        # external field contribution: - \sum_j \Delta \sigma_j h_ext_j
+        field_term = -tf.reduce_sum(
+            delta_sigma *
+            tf.gather(tf.reshape(self.external_field, [-1]), disturbed_idx)
+        )
+
+        return term1 + term2 + field_term
+
     # TODO: Compute the magnetization susceptibility as the variance of the magnetization. I need to first use a populational method to compute the mag
 
     @tf.function
@@ -144,7 +181,7 @@ class SpinSystem(tf.Module):
         return tf.reduce_mean(spin_state)
 
     @tf.function
-    def flip_spins(self, num_flips: tf.Tensor, spin_state: Optional[tf.Tensor] = None, spin_flat: Optional[tf.Tensor] = None) -> tf.Tensor:
+    def flip_spins(self, num_flips: tf.Tensor, spin_state: Optional[tf.Tensor] = None, spin_flat: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, tf.Tensor]:
         """Flip `num_flips` random spins in Ising model."""
         both_none = (spin_state is None) and (spin_flat is None)
         exactly_one = (spin_state is not None) ^ (spin_flat is not None)
@@ -161,18 +198,21 @@ class SpinSystem(tf.Module):
         idx = tf.random.shuffle(tf.range(self.number_spins, dtype=tf.int32))[
             :num_flips]
         updates = -tf.gather(spin_flat, idx)
-        return tf.tensor_scatter_nd_update(spin_flat,
-                                           indices=tf.expand_dims(idx, 1),
-                                           updates=updates)
+        updated = tf.tensor_scatter_nd_update(spin_flat,
+                                              indices=tf.expand_dims(idx, 1),
+                                              updates=updates)
+        energy_delta = self._compute_pairwise_energy_delta(
+            spin_flat, updated, idx)
+        return updated, energy_delta
 
     @tf.function
     def rotate_spins(self, num_pairs: tf.Tensor, theta_max: tf.Tensor,
-                     spin_state: Optional[tf.Tensor] = None, spin_flat: Optional[tf.Tensor] = None) -> tf.Tensor:
+                     spin_state: Optional[tf.Tensor] = None, spin_flat: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, tf.Tensor]:
         """Rotate `num_pairs` pairs of spins by random angles in [-theta_max, theta_max]."""
 
         both_none = (spin_state is None) and (spin_flat is None)
         exactly_one = (spin_state is not None) ^ (
-            spin_flat is not None)  # XOR operation
+            spin_flat is not None)
 
         tf.debugging.assert_equal(both_none or exactly_one, True,
                                   message="Either provide no arguments or exactly one of spin_state or spin_flat")
@@ -198,16 +238,21 @@ class SpinSystem(tf.Module):
         updates = tf.concat([new_i, new_j], axis=0)
         indices = tf.concat([tf.expand_dims(idx1, 1),
                             tf.expand_dims(idx2, 1)], axis=0)
+        updated = tf.tensor_scatter_nd_update(spin_flat, indices, updates)
 
-        return tf.tensor_scatter_nd_update(spin_flat, indices, updates)
+        energy_delta = self._compute_pairwise_energy_delta(
+            spin_flat, updated, idx)
+
+        return updated, energy_delta
 
     @tf.function
     def _disturb_state(self, num_disturb: Optional[tf.Tensor], theta_max: Optional[tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
 
         if self.model == "ising":
-            new_spin_flat = self.flip_spins(num_disturb)
+            new_spin_flat, energy_delta = self.flip_spins(num_disturb)
         elif self.model == "spherical":
-            new_spin_flat = self.rotate_spins(num_disturb, theta_max)
+            new_spin_flat, energy_delta = self.rotate_spins(
+                num_disturb, theta_max)
         elif self.model == "z2_gauge":
             raise NotImplementedError("")
 
@@ -215,9 +260,6 @@ class SpinSystem(tf.Module):
 
         if self.spherical_contraint:
             next_spin_state = self._apply_spherical_constraint(next_spin_state)
-
-        energy_delta = self.compute_pairwise_energy(
-            next_spin_state) - self.compute_pairwise_energy()
 
         return next_spin_state, energy_delta
 
