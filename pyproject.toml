@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spin_system"
+version = "0.1.0"
+description = "A simulation framework for spin systems"
+authors = [
+    { name = "Lucas Gomes de Oliveira Corbanez" }
+]
+requires-python = ">=3.12.3"
+dependencies = [
+    "tensorflow>=2.20.0",
+    "numpy>=2.3.3",
+    "plotly"
+]
+
+[tool.setuptools]
+packages = ["spin_system"]

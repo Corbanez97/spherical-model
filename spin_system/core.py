@@ -194,7 +194,6 @@ class SpinSystem(tf.Module):
         elif spin_flat is None:
             spin_flat = tf.reshape(self.spin_state, [-1])
 
-        # num_flips = tf.cast(num_flips, tf.int32)
         idx = tf.random.shuffle(tf.range(self.number_spins, dtype=tf.int32))[
             :num_flips]
         updates = -tf.gather(spin_flat, idx)
@@ -274,11 +273,13 @@ class SpinSystem(tf.Module):
             energy_delta < 0.0,
             tf.random.uniform([]) < tf.exp(-beta * energy_delta)
         )
-        new_spin_state = tf.where(accept, next_spin_state, self.spin_state)
 
-        self.spin_state.assign(new_spin_state)
+        # new_spin_state = tf.where(accept, next_spin_state, self.spin_state)
 
-        return new_spin_state
+        if accept:
+            self.spin_state.assign(next_spin_state)
+
+        return self.spin_state
 
     @tf.function
     def metropolis_sweep(
