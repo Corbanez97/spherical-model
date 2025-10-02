@@ -57,8 +57,7 @@ class SpinSystem(tf.Module):
             ),
         )
 
-        self.energy_replicas = self.compute_pairwise_energies()
-        self.energy_average = tf.reduce_mean(self.energy_replicas)
+        self.energy = tf.Variable(self.compute_pairwise_energies())
 
     def _validate_tensor_shape(
         self,
@@ -373,6 +372,10 @@ class SpinSystem(tf.Module):
                 next_spin_state,
                 self.spin_state
             )
+
+            self.energy.assign_add(
+                tf.where(accept, energy_delta, tf.zeros_like(energy_delta)))
+
             self.spin_state.assign(new_spin_state)
 
         return self.spin_state
@@ -411,7 +414,7 @@ class SpinSystem(tf.Module):
             spin_evolution = spin_evolution.write(0, self.spin_state)
         if track_energy:
             energy_evolution = energy_evolution.write(
-                0, self.compute_pairwise_energies())
+                0, self.energy)
         if track_magnetization:
             magnetization_evolution = magnetization_evolution.write(
                 0, self.compute_magnetizations())
@@ -426,7 +429,7 @@ class SpinSystem(tf.Module):
                         j + 1, self.spin_state)
                 if track_energy:
                     energy_evolution = energy_evolution.write(
-                        j + 1, self.compute_pairwise_energies())
+                        j + 1, self.energy)
                 if track_magnetization:
                     magnetization_evolution = magnetization_evolution.write(
                         j + 1, self.compute_magnetizations())
@@ -460,6 +463,7 @@ class SpinSystem(tf.Module):
         num_disturb: Optional[tf.Tensor] = 1,
         theta_max: Optional[tf.Tensor] = None,
         sweep_length: int = 100,
+        restore_initial_state: bool = True,
         track_spins: bool = False,
         track_energy: bool = False,
         track_magnetization: bool = True,
@@ -484,7 +488,8 @@ class SpinSystem(tf.Module):
             beta = betas[i]
 
             # Save original spin state
-            original_spin_state = tf.identity(self.spin_state)
+            if restore_initial_state == True:
+                original_spin_state = tf.identity(self.spin_state)
 
             # Run a full sweep
             results = self.metropolis_sweep(
@@ -507,7 +512,8 @@ class SpinSystem(tf.Module):
                     i, results["magnetization_evolution"])
 
             # Restore spin state before moving to next beta
-            self.spin_state.assign(original_spin_state)
+            if restore_initial_state == True:
+                self.spin_state.assign(original_spin_state)
 
             return i + 1, spin_array, energy_array, mag_array
 
@@ -518,7 +524,7 @@ class SpinSystem(tf.Module):
             loop_vars=[i0, spin_array, energy_array, mag_array],
         )
 
-        result = {}
+        result = {"betas": betas}
         if track_spins:
             result["spin_evolution"] = spin_array.stack()
         if track_energy:
