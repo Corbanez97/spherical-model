@@ -51,3 +51,28 @@ def periodic_nn(D, L):
         J_tensor[tuple(coords[i]) + tuple(coords[j])] = 1.0
 
     return J_tensor
+
+
+def curie_weiss(D, L, J0=1.0):
+    N = L**D
+
+    J_flat = (J0 / N) * (np.ones((N, N)) - np.eye(N))
+
+    tensor_shape = (L,) * D * 2
+    J_tensor = J_flat.reshape(tensor_shape)
+
+    return J_tensor
+
+
+def gaussian_interaction(D, L, mean=0.0, std=1.0):
+    N = L**D
+    J_flat = np.random.normal(mean, std, size=(N, N))
+
+    J_flat = 0.5 * (J_flat + J_flat.T)
+
+    np.fill_diagonal(J_flat, 0)
+
+    tensor_shape = (L,) * D * 2
+    J_tensor = J_flat.reshape(tensor_shape)
+
+    return J_tensor
