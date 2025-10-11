@@ -1,3 +1,4 @@
+from plotly.subplots import make_subplots
 import numpy as np
 import plotly.graph_objects as go
 
@@ -101,4 +102,110 @@ def plot_spin_evolution(
         ]
     )
 
+    return fig
+
+
+def plot_replica_overlap(replica_a, replica_b, steps_to_show=200, width=1000, height=800, title="Replica Correlation Evolution"):
+    # Ensure numpy arrays
+    if hasattr(replica_a, "numpy"):
+        replica_a = replica_a.numpy()
+    if hasattr(replica_b, "numpy"):
+        replica_b = replica_b.numpy()
+
+    assert replica_a.shape == replica_b.shape, "Replicas must have the same shape"
+
+    n_steps = replica_a.shape[0]
+    steps_to_show = min(steps_to_show, n_steps)
+    frames_idx = np.linspace(0, n_steps - 1, steps_to_show, dtype=int)
+
+    # Compute overlap
+    overlap = replica_a * replica_b
+
+    # --- Create subplot grid ---
+    # Two rows, two columns, with right column spanning both rows
+    fig = make_subplots(
+        rows=2, cols=2,
+        specs=[
+            [{"type": "heatmap"}, {"type": "heatmap", "rowspan": 2}],
+            [{"type": "heatmap"}, None]
+        ],
+        column_widths=[0.6, 1.2],
+        row_heights=[0.5, 0.5],
+        horizontal_spacing=0.05,
+        vertical_spacing=0.08,
+        subplot_titles=("Replica A", "Overlap (A × B)", "Replica B"),
+    )
+
+    # --- Add initial traces ---
+    fig.add_trace(go.Heatmap(
+        z=replica_a[0], colorscale="RdBu", zmin=-1, zmax=1,
+        showscale=False
+    ), row=1, col=1)
+
+    fig.add_trace(go.Heatmap(
+        z=replica_b[0], colorscale="RdBu", zmin=-1, zmax=1,
+        showscale=False
+    ), row=2, col=1)
+
+    fig.add_trace(go.Heatmap(
+        z=overlap[0], colorscale="RdBu", zmin=-1, zmax=1,
+        showscale=False
+    ), row=1, col=2)
+
+    # --- Create frames ---
+    frames = []
+    for k in frames_idx:
+        frames.append(go.Frame(
+            data=[
+                go.Heatmap(z=replica_a[k], colorscale="RdBu",
+                           zmin=-1, zmax=1, showscale=False),
+                go.Heatmap(z=replica_b[k], colorscale="RdBu",
+                           zmin=-1, zmax=1, showscale=False),
+                go.Heatmap(z=overlap[k], colorscale="RdBu",
+                           zmin=-1, zmax=1, showscale=False)
+            ],
+            name=str(k)
+        ))
+
+    # --- Create slider steps ---
+    slider_steps = [
+        {
+            "args": [[str(k)], {"frame": {"duration": 0, "redraw": True},
+                                "mode": "immediate",
+                                "transition": {"duration": 0}}],
+            "label": str(k),
+            "method": "animate"
+        }
+        for k in frames_idx
+    ]
+
+    # --- Layout and animation controls ---
+    fig.update_layout(
+        title=title,
+        width=width,
+        height=height,
+        margin=dict(t=100, l=10, r=10, b=50),
+        sliders=[{
+            "active": 0,
+            "yanchor": "top",
+            "xanchor": "left",
+            "currentvalue": {
+                "font": {"size": 10},
+                "prefix": "Step: ",
+                "visible": True,
+                "xanchor": "right"
+            },
+            "transition": {"duration": 0},
+            "pad": {"b": 10, "t": 50},
+            "len": 0.9,
+            "x": 0.05,
+            "y": 0,
+            "steps": slider_steps
+        }]
+    )
+
+    fig.update_annotations(font_size=10)
+    fig.update_xaxes(showticklabels=False)
+    fig.update_yaxes(showticklabels=False)
+    fig.frames = frames
     return fig

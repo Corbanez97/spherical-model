@@ -17,12 +17,14 @@ class SpinSystem(tf.Module):
         initial_magnetization: float = 0.5,
     ) -> None:
 
-        assert model in ("ising", "spherical", "z2_gauge"), \
-            ValueError(
-                f"Invalid model: {model}. Please select one of 'ising', 'spherical' or 'z2_gauge'.")
+        if model not in ("ising", "spherical", "z2_gauge"):
+            raise ValueError(
+                f"Invalid model: {model}. Please select one of 'ising', 'spherical', or 'z2_gauge'."
+            )
 
-        assert not (model != "spherical" and spherical_constraint), \
-            "Spherical constraint can only be applied to spherical model!"
+        if model != "spherical" and spherical_constraint:
+            raise ValueError(
+                "Spherical constraint can only be applied to spherical model!")
 
         self.lattice_dim = lattice_dim
         self.lattice_length = lattice_length
@@ -137,7 +139,9 @@ class SpinSystem(tf.Module):
         external_field: Optional[tf.Tensor] = None,
     ) -> tf.Tensor:
 
-        assert self.model != "z2_gauge", "Can not compute pairwise energy for Z2 gauge model"
+        if self.model == "z2_gauge":
+            raise ValueError(
+                "Cannot compute pairwise energy for Z2 gauge model")
 
         if spin_state is None:
             spin_state = self.spin_state
@@ -204,8 +208,6 @@ class SpinSystem(tf.Module):
 
         return term1 + term2 + field_term
 
-    # TODO: Compute the magnetization susceptibility as the variance of the magnetization. I need to first use a populational method to compute the mag
-
     @tf.function
     def compute_magnetizations(self, spin_state: Optional[tf.Tensor] = None) -> tf.Tensor:
         if spin_state is None:
@@ -223,6 +225,24 @@ class SpinSystem(tf.Module):
         if spin_state is None:
             spin_state = self.spin_state
         return tf.math.reduce_variance(spin_state)
+
+    @tf.function
+    def compute_overlap_matrix(self, spin_state: Optional[tf.Tensor] = None) -> tf.Tensor:
+        """
+        Compute the overlap matrix between all replicas.
+
+        Q_ab = (1/N) * sum_i s_i^a * s_i^b
+        Returns: Tensor of shape (replicas, replicas)
+        """
+        if spin_state is None:
+            spin_state = self.spin_state
+
+        spin_flat = tf.reshape(spin_state, (self.lattice_replicas, -1))
+
+        overlap = tf.matmul(spin_flat, spin_flat, transpose_b=True)
+        overlap /= self.number_spins
+
+        return overlap
 
     @tf.function
     def flip_spins(self, num_flips: tf.Tensor, spin_state: Optional[tf.Tensor] = None, spin_flat: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -391,10 +411,12 @@ class SpinSystem(tf.Module):
         track_spins: bool = True,
         track_energy: bool = True,
         track_magnetization: bool = True,
+        track_overlap: bool = True,
     ) -> Dict:
 
-        assert not (self.model == "spherical" and theta_max is None), \
-            "For the spherical model, theta_max must be provided."
+        if self.model == "spherical" and theta_max is None:
+            raise ValueError(
+                "For the spherical model, theta_max must be provided.")
 
         def make_array(track, size):
             # This is bad because the code tries to access a tensor even if I don't want to track it...
@@ -409,6 +431,8 @@ class SpinSystem(tf.Module):
             track_energy, int(round(sweep_length/measurement_granularity)) + 1)
         magnetization_evolution = make_array(
             track_magnetization, int(round(sweep_length/measurement_granularity)) + 1)
+        overlap_evolution = make_array(
+            track_overlap, int(round(sweep_length/measurement_granularity)) + 1)
 
         if track_spins:
             spin_evolution = spin_evolution.write(0, self.spin_state)
@@ -418,8 +442,11 @@ class SpinSystem(tf.Module):
         if track_magnetization:
             magnetization_evolution = magnetization_evolution.write(
                 0, self.compute_magnetizations())
+        if track_overlap:
+            overlap_evolution = overlap_evolution.write(
+                0, self.compute_overlap_matrix())
 
-        def body(i, spin_evolution, energy_evolution, magnetization_evolution):
+        def body(i, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution):
             _ = self.metropolis_step(beta, num_disturb, theta_max)
 
             if i % measurement_granularity == 0:
@@ -433,15 +460,18 @@ class SpinSystem(tf.Module):
                 if track_magnetization:
                     magnetization_evolution = magnetization_evolution.write(
                         j + 1, self.compute_magnetizations())
+                if track_overlap:
+                    overlap_evolution = overlap_evolution.write(
+                        j + 1, self.compute_overlap_matrix())
 
-            return i + 1, spin_evolution, energy_evolution, magnetization_evolution
+            return i + 1, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution
 
         i = tf.constant(0)
-        _, spin_evolution, energy_evolution, magnetization_evolution = tf.while_loop(
+        _, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution = tf.while_loop(
             lambda i, *_: i < sweep_length,
             body,
             loop_vars=[i, spin_evolution,
-                       energy_evolution, magnetization_evolution],
+                       energy_evolution, magnetization_evolution, overlap_evolution],
         )
 
         result = {}
@@ -451,10 +481,10 @@ class SpinSystem(tf.Module):
             result["energy_evolution"] = energy_evolution.stack()
         if track_magnetization:
             result["magnetization_evolution"] = magnetization_evolution.stack()
+        if track_overlap:
+            result["overlap_evolution"] = overlap_evolution.stack()
 
         return result
-
-    # TODO: Refeed the previous spin_state
 
     @tf.function
     def multi_temperature_sweep(
@@ -467,6 +497,7 @@ class SpinSystem(tf.Module):
         track_spins: bool = False,
         track_energy: bool = False,
         track_magnetization: bool = True,
+        track_overlap: bool = True
     ):
         """
         Perform independent Metropolis sweeps for multiple inverse temperatures (betas).
@@ -483,8 +514,9 @@ class SpinSystem(tf.Module):
         spin_array = make_array(track_spins, n_temps)
         energy_array = make_array(track_energy, n_temps)
         mag_array = make_array(track_magnetization, n_temps)
+        overlap_array = make_array(track_overlap, n_temps)
 
-        def body(i, spin_array, energy_array, mag_array):
+        def body(i, spin_array, energy_array, mag_array, overlap_array):
             beta = betas[i]
 
             # Save original spin state
@@ -500,6 +532,7 @@ class SpinSystem(tf.Module):
                 track_spins=track_spins,
                 track_energy=track_energy,
                 track_magnetization=track_magnetization,
+                track_overlap=track_overlap
             )
 
             if track_spins:
@@ -510,18 +543,20 @@ class SpinSystem(tf.Module):
             if track_magnetization:
                 mag_array = mag_array.write(
                     i, results["magnetization_evolution"])
+            if track_overlap:
+                overlap_array = overlap_array.write(
+                    i, results["overlap_evolution"])
 
-            # Restore spin state before moving to next beta
             if restore_initial_state == True:
                 self.spin_state.assign(original_spin_state)
 
-            return i + 1, spin_array, energy_array, mag_array
+            return i + 1, spin_array, energy_array, mag_array, overlap_array
 
         i0 = tf.constant(0)
-        _, spin_array, energy_array, mag_array = tf.while_loop(
+        _, spin_array, energy_array, mag_array, overlap_array = tf.while_loop(
             lambda i, *_: i < n_temps,
             body,
-            loop_vars=[i0, spin_array, energy_array, mag_array],
+            loop_vars=[i0, spin_array, energy_array, mag_array, overlap_array],
         )
 
         result = {"betas": betas}
@@ -531,5 +566,7 @@ class SpinSystem(tf.Module):
             result["energy_evolution"] = energy_array.stack()
         if track_magnetization:
             result["magnetization_evolution"] = mag_array.stack()
+        if track_overlap:
+            result["overlap_evolution"] = overlap_array.stack()
 
         return result
