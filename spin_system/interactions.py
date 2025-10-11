@@ -76,3 +76,57 @@ def gaussian_interaction(D, L, mean=0.0, std=1.0):
     J_tensor = J_flat.reshape(tensor_shape)
 
     return J_tensor
+
+
+def z2gauge_interaction_tensor(L, periodic="xy", interaction_strength=1.0):
+    """
+    Build a 3-layer interaction tensor for 2D Z2 gauge theory on a square lattice.
+
+    Parameters
+    ----------
+    L : int
+        Lattice size (LxL square lattice).
+    periodic : str
+        Periodic boundary conditions: "x", "y", "xy", or None
+    interaction_strength : float
+        Value of the interaction for nearest neighbors.
+
+    Returns
+    -------
+    J_tensor : np.ndarray
+        Shape (3, L, L, L, L)
+        Layer 0: horizontal-horizontal interactions
+        Layer 1: vertical-vertical interactions
+        Layer 2: horizontal-vertical interactions (plaquette)
+    """
+    # Initialize empty tensor
+    J_tensor = np.zeros((3, L, L, L, L), dtype=np.float32)
+
+    # Horizontal-horizontal (row neighbors)
+    for i in range(L):
+        for j in range(L):
+            j_next = (j + 1) % L if 'y' in periodic else j + 1
+            if j_next < L:
+                J_tensor[0, i, j, i, j_next] = interaction_strength
+
+    # Vertical-vertical (column neighbors)
+    for i in range(L):
+        for j in range(L):
+            i_next = (i + 1) % L if 'x' in periodic else i + 1
+            if i_next < L:
+                J_tensor[1, i, j, i_next, j] = interaction_strength
+
+    # Horizontal-vertical (plaquette interactions)
+    for i in range(L):
+        for j in range(L):
+            i_next = (i + 1) % L if 'x' in periodic else i + 1
+            j_next = (j + 1) % L if 'y' in periodic else j + 1
+            if i_next < L and j_next < L:
+                # Bottom-left horizontal-vertical interaction
+                J_tensor[2, i, j, i, j] = interaction_strength
+                # Other links forming the plaquette
+                # J_tensor[2, i, j, i_next, j] = interaction_strength
+                # J_tensor[2, i, j, i, j_next] = interaction_strength
+                # J_tensor[2, i, j, i_next, j_next] = interaction_strength
+
+    return J_tensor
