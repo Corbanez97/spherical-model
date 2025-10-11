@@ -17,12 +17,14 @@ class SpinSystem(tf.Module):
         initial_magnetization: float = 0.5,
     ) -> None:
 
-        assert model in ("ising", "spherical", "z2_gauge"), \
-            ValueError(
-                f"Invalid model: {model}. Please select one of 'ising', 'spherical' or 'z2_gauge'.")
+        if model not in ("ising", "spherical", "z2_gauge"):
+            raise ValueError(
+                f"Invalid model: {model}. Please select one of 'ising', 'spherical', or 'z2_gauge'."
+            )
 
-        assert not (model != "spherical" and spherical_constraint), \
-            "Spherical constraint can only be applied to spherical model!"
+        if model != "spherical" and spherical_constraint:
+            raise ValueError(
+                "Spherical constraint can only be applied to spherical model!")
 
         self.lattice_dim = lattice_dim
         self.lattice_length = lattice_length
@@ -137,7 +139,9 @@ class SpinSystem(tf.Module):
         external_field: Optional[tf.Tensor] = None,
     ) -> tf.Tensor:
 
-        assert self.model != "z2_gauge", "Can not compute pairwise energy for Z2 gauge model"
+        if self.model == "z2_gauge":
+            raise ValueError(
+                "Cannot compute pairwise energy for Z2 gauge model")
 
         if spin_state is None:
             spin_state = self.spin_state
@@ -203,8 +207,6 @@ class SpinSystem(tf.Module):
         field_term = -tf.reduce_sum(delta_sigma * disturbed_fields, axis=1)
 
         return term1 + term2 + field_term
-
-    # TODO: Compute the magnetization susceptibility as the variance of the magnetization. I need to first use a populational method to compute the mag
 
     @tf.function
     def compute_magnetizations(self, spin_state: Optional[tf.Tensor] = None) -> tf.Tensor:
@@ -412,8 +414,9 @@ class SpinSystem(tf.Module):
         track_overlap: bool = True,
     ) -> Dict:
 
-        assert not (self.model == "spherical" and theta_max is None), \
-            "For the spherical model, theta_max must be provided."
+        if self.model == "spherical" and theta_max is None:
+            raise ValueError(
+                "For the spherical model, theta_max must be provided.")
 
         def make_array(track, size):
             # This is bad because the code tries to access a tensor even if I don't want to track it...
@@ -482,8 +485,6 @@ class SpinSystem(tf.Module):
             result["overlap_evolution"] = overlap_evolution.stack()
 
         return result
-
-    # TODO: Refeed the previous spin_state
 
     @tf.function
     def multi_temperature_sweep(
