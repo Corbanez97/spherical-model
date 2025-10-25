@@ -24,7 +24,12 @@ class SpinSystem(tf.Module):
 
         if model != "spherical" and spherical_constraint:
             raise ValueError(
-                "Spherical constraint can only be applied to spherical model!")
+                "Spherical constraint can only be applied to spherical model.")
+
+        if model == "z2_gauge" and lattice_dim != 2:
+            raise ValueError(
+                "Lattice dimension must be 2 for Z2 gauge model."
+            )
 
         self.lattice_dim = lattice_dim
         self.lattice_length = lattice_length
@@ -37,7 +42,8 @@ class SpinSystem(tf.Module):
 
         self.interaction_matrix = self._validate_tensor_shape(
             interaction_matrix,
-            expected_shape=self.shape + self.shape,
+            expected_shape=(
+                3, *self.shape, *self.shape) if self.model == "z2_gauge" else self.shape + self.shape,
             name="Interaction matrix",
         )
 
@@ -51,7 +57,8 @@ class SpinSystem(tf.Module):
 
         self.spin_state = self._validate_tensor_shape(
             initial_spin_state,
-            expected_shape=[self.shape] * self.lattice_replicas,
+            expected_shape=(self.lattice_replicas, *self.shape,
+                            2) if self.model == "z2_gauge" else (self.lattice_replicas, *self.shape),
             name="Initial spin state",
             allow_none=True,
             default=lambda: tf.Variable(
@@ -59,7 +66,13 @@ class SpinSystem(tf.Module):
             ),
         )
 
-        self.energy = tf.Variable(self.compute_pairwise_energies())
+        if self.model == "z2_gauge":
+            self.plaquette = tf.Variable(
+                self.compute_plaquette(), trainable=False)
+            self.energy = tf.Variable(tf.reduce_sum(
+                self.plaquette, axis=[1, 2]), trainable=False)
+        else:
+            self.energy = tf.Variable(self.compute_pairwise_energies())
 
     def _validate_tensor_shape(
         self,
@@ -118,14 +131,25 @@ class SpinSystem(tf.Module):
             spin_state = tf.random.normal(
                 self.shape, mean=self.initial_magnetization, stddev=1.0)
         elif self.model == "z2_gauge":
-            raise NotImplementedError("Z2 gauge model not implemented yet")
+            p_up = 0.5 + 0.5 * tf.tanh(self.initial_magnetization)
+            spin_state_horizontal = tf.cast(tf.random.uniform(
+                self.shape) < p_up, tf.float32)
+            spin_state_vertical = tf.cast(tf.random.uniform(
+                self.shape) < p_up, tf.float32)
+
+            spin_state_horizontal = 2 * spin_state_horizontal - 1
+            spin_state_vertical = 2 * spin_state_vertical - 1
+
+            spin_state = tf.stack(
+                [spin_state_horizontal, spin_state_vertical], axis=-1)
 
         expanded_spin_state = tf.expand_dims(spin_state, axis=0)
 
-        multiples = tf.constant(
-            [self.lattice_replicas] + [1] * self.lattice_dim, dtype=tf.int32)
+        multiples = [self.lattice_replicas] + [1] * \
+            (len(expanded_spin_state.shape) - 1)
 
         spin_state = tf.tile(expanded_spin_state, multiples)
+
         if self.spherical_constraint:
             spin_state = self._apply_spherical_constraint(spin_state)
 
@@ -209,6 +233,49 @@ class SpinSystem(tf.Module):
         return term1 + term2 + field_term
 
     @tf.function
+    def compute_plaquette(self, spin_state: Optional[tf.Tensor] = None) -> tf.Tensor:
+        """
+        Compute the plaquette for Z2 gauge model:
+        σ_h = horizontal spins
+        σ_v = vertical spins
+        J_h, J_v, J_hv = interaction matrices
+        Returns: plaquette of shape (replicas, L, L)
+        """
+
+        if self.model != "z2_gauge":
+            raise ValueError(
+                "Cannot compute plaquettes for non Z2 gauge model")
+
+        if spin_state is None:
+            spin_state = self.spin_state
+
+        sigma_h = spin_state[..., 0]
+        sigma_v = spin_state[..., 1]
+
+        J_h = self.interaction_matrix[0, ...]
+        J_v = self.interaction_matrix[1, ...]
+        J_hv = self.interaction_matrix[2, ...]
+
+        # flatten spins
+        sigma_h_flat = tf.reshape(
+            sigma_h, (self.lattice_replicas, self.number_spins, 1))
+        sigma_v_flat = tf.reshape(
+            sigma_v, (self.lattice_replicas, self.number_spins, 1))
+
+        # flatten interactions
+        Jh_flat = tf.reshape(J_h, (self.number_spins, self.number_spins))
+        Jv_flat = tf.reshape(J_v, (self.number_spins, self.number_spins))
+        Jhv_flat = tf.reshape(J_hv, (self.number_spins, self.number_spins))
+
+        plaquette = tf.reshape(
+            (sigma_h_flat * (Jh_flat @ sigma_h_flat)) *
+            (Jhv_flat @ (sigma_v_flat * (Jv_flat @ sigma_v_flat))),
+            (self.lattice_replicas, self.lattice_length, self.lattice_length)
+        )
+
+        return plaquette
+
+    @tf.function
     def compute_magnetizations(self, spin_state: Optional[tf.Tensor] = None) -> tf.Tensor:
         if spin_state is None:
             spin_state = self.spin_state
@@ -243,6 +310,52 @@ class SpinSystem(tf.Module):
         overlap /= self.number_spins
 
         return overlap
+
+    def compute_wilson_loop(
+        self,
+        loop_size: int = 1,
+        spin_state: Optional[tf.Tensor] = None,
+    ) -> tf.Tensor:
+        """
+        Compute Wilson loops of size loop_size x loop_size for all replicas.
+
+        Args:
+            loop_size: Size of the square loop.
+            spin_state: Optional spin state tensor (replica, L, L, 2). 
+                        Defaults to self.spin_state.
+
+        Returns:
+            Tensor of shape (replicas, L - loop_size, L - loop_size)
+            with Wilson loop value at each starting site.
+        """
+        if self.model != "z2_gauge":
+            raise ValueError("Wilson loops only defined for z2_gauge model.")
+
+        if spin_state is None:
+            spin_state = self.spin_state
+
+        L = self.lattice_length
+
+        sigma_h = spin_state[..., 0]
+        sigma_v = spin_state[..., 1]
+
+        wilson_loops = []
+        for i in range(L - loop_size):
+            row_loops = []
+            for j in range(L - loop_size):
+                top = tf.reduce_prod(sigma_h[:, i, j:j+loop_size], axis=-1)
+                right = tf.reduce_prod(
+                    sigma_v[:, i:i+loop_size, j+loop_size], axis=-1)
+                bottom = tf.reduce_prod(
+                    sigma_h[:, i+loop_size, j:j+loop_size], axis=-1)
+                left = tf.reduce_prod(sigma_v[:, i:i+loop_size, j], axis=-1)
+
+                loop_val = top * right * bottom * left
+                row_loops.append(loop_val)
+            wilson_loops.append(tf.stack(row_loops, axis=-1))
+
+        wilson_loops = tf.stack(wilson_loops, axis=-2)
+        return wilson_loops
 
     @tf.function
     def flip_spins(self, num_flips: tf.Tensor, spin_state: Optional[tf.Tensor] = None, spin_flat: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -342,22 +455,68 @@ class SpinSystem(tf.Module):
         return updated_flat, energy_delta
 
     @tf.function
-    def _disturb_state(self, num_disturb: Optional[tf.Tensor], theta_max: Optional[tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
+    def flip_links(self, num_flips: tf.Tensor, spin_state: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        """Randomly flip num_flips gauge links per replica for Z2 gauge model."""
+        if spin_state is None:
+            spin_state = self.spin_state
 
+        L = tf.cast(self.lattice_length, tf.int32)
+        num_sites = tf.cast(self.number_spins, tf.int32)
+
+        idx_sites = tf.stack([
+            tf.random.shuffle(tf.range(num_sites))[:num_flips]
+            for _ in range(self.lattice_replicas)
+        ], axis=0)
+
+        i_coords = idx_sites // L
+        j_coords = idx_sites % L
+
+        sublattice_idx = tf.random.uniform(
+            shape=(self.lattice_replicas, num_flips),
+            minval=0, maxval=2, dtype=tf.int32
+        )
+
+        replica_idx = tf.repeat(tf.range(self.lattice_replicas)[
+                                :, None], num_flips, axis=1)
+        gather_indices = tf.stack(
+            [replica_idx, i_coords, j_coords, sublattice_idx], axis=-1)
+
+        gathered = tf.gather_nd(spin_state, gather_indices)
+        flipped = -gathered
+
+        new_spin_state = tf.tensor_scatter_nd_update(
+            spin_state, gather_indices, flipped)
+
+        new_plaquette = self.compute_plaquette(new_spin_state)
+        new_energy = tf.reduce_sum(
+            new_plaquette, axis=(1, 2))
+
+        energy_delta = new_energy - self.energy
+
+        return new_spin_state, new_plaquette, energy_delta
+
+    @tf.function
+    def _disturb_state(self, num_disturb: Optional[tf.Tensor], theta_max: Optional[tf.Tensor]):
         if self.model == "ising":
             new_spin_flat, energy_delta = self.flip_spins(num_disturb)
+            next_spin_state = tf.reshape(new_spin_flat, self.spin_state.shape)
+            return next_spin_state, None, energy_delta
+
         elif self.model == "spherical":
             new_spin_flat, energy_delta = self.rotate_spins(
                 num_disturb, theta_max)
+            next_spin_state = tf.reshape(new_spin_flat, self.spin_state.shape)
+
+            if self.spherical_constraint:
+                next_spin_state = self._apply_spherical_constraint(
+                    next_spin_state)
+
+            return next_spin_state, None, energy_delta
+
         elif self.model == "z2_gauge":
-            raise NotImplementedError("")
-
-        next_spin_state = tf.reshape(new_spin_flat, self.spin_state.shape)
-
-        if self.spherical_constraint:
-            next_spin_state = self._apply_spherical_constraint(next_spin_state)
-
-        return next_spin_state, energy_delta
+            next_spin_state, next_plaquette, energy_delta = self.flip_links(
+                num_disturb)
+            return next_spin_state, next_plaquette, energy_delta
 
     @tf.function
     def metropolis_step(
@@ -369,16 +528,14 @@ class SpinSystem(tf.Module):
         """
         Perform a single Metropolis update step independently for each replica.
         """
-        next_spin_state, energy_delta = self._disturb_state(
+        next_spin_state, next_plaquette, energy_delta = self._disturb_state(
             num_disturb=num_disturb,
             theta_max=theta_max
         )
 
         prob_accept = tf.exp(-beta * energy_delta)
-
         random_vals = tf.random.uniform(
-            shape=(self.lattice_replicas,), dtype=tf.float32
-        )
+            shape=(self.lattice_replicas,), dtype=tf.float32)
 
         accept = tf.logical_or(
             energy_delta < 0.0,
@@ -386,17 +543,30 @@ class SpinSystem(tf.Module):
         )
 
         if tf.reduce_any(accept):
-
+            # Update spins for accepted replicas
             new_spin_state = tf.where(
-                tf.reshape(accept, (-1,) + (1,) * self.lattice_dim),
+                tf.reshape(
+                    accept, (-1,) + (1,) * (self.lattice_dim + 1)
+                ) if self.model == "z2_gauge"
+                else tf.reshape(accept, (-1,) + (1,) * self.lattice_dim),
                 next_spin_state,
                 self.spin_state
             )
-
-            self.energy.assign_add(
-                tf.where(accept, energy_delta, tf.zeros_like(energy_delta)))
-
             self.spin_state.assign(new_spin_state)
+
+            # Update energies
+            new_energy = tf.where(accept, self.energy +
+                                  energy_delta, self.energy)
+            self.energy.assign(new_energy)
+
+            # Update plaquette only for z2_gauge
+            if self.model == "z2_gauge" and next_plaquette is not None:
+                new_plaquette = tf.where(
+                    tf.reshape(accept, (-1,) + (1,) * 2),  # (replica, 1, 1)
+                    next_plaquette,
+                    self.plaquette
+                )
+                self.plaquette.assign(new_plaquette)
 
         return self.spin_state
 
@@ -412,14 +582,20 @@ class SpinSystem(tf.Module):
         track_energy: bool = True,
         track_magnetization: bool = True,
         track_overlap: bool = True,
+        track_plaquette: bool = False
     ) -> Dict:
 
         if self.model == "spherical" and theta_max is None:
             raise ValueError(
                 "For the spherical model, theta_max must be provided.")
 
+        if self.model != "z2_gauge" and track_plaquette is True:
+            raise ValueError(
+                "You can only track plaquettes for the z2 gauge model."
+            )
+
         def make_array(track, size):
-            # This is bad because the code tries to access a tensor even if I don't want to track it...
+            # Code smell
             return tf.TensorArray(dtype=tf.float32, size=size) if track else tf.TensorArray(dtype=tf.float32, size=0)
 
         if sweep_length == None:
@@ -433,6 +609,8 @@ class SpinSystem(tf.Module):
             track_magnetization, int(round(sweep_length/measurement_granularity)) + 1)
         overlap_evolution = make_array(
             track_overlap, int(round(sweep_length/measurement_granularity)) + 1)
+        plaquette_evolution = make_array(
+            track_plaquette, int(round(sweep_length/measurement_granularity)) + 1)
 
         if track_spins:
             spin_evolution = spin_evolution.write(0, self.spin_state)
@@ -445,8 +623,10 @@ class SpinSystem(tf.Module):
         if track_overlap:
             overlap_evolution = overlap_evolution.write(
                 0, self.compute_overlap_matrix())
+        if track_plaquette:
+            plaquette_evolution = plaquette_evolution.write(0, self.plaquette)
 
-        def body(i, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution):
+        def body(i, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution, plaquette_evolution):
             _ = self.metropolis_step(beta, num_disturb, theta_max)
 
             if i % measurement_granularity == 0:
@@ -463,15 +643,19 @@ class SpinSystem(tf.Module):
                 if track_overlap:
                     overlap_evolution = overlap_evolution.write(
                         j + 1, self.compute_overlap_matrix())
+                if track_plaquette:
+                    plaquette_evolution = plaquette_evolution.write(
+                        j + 1, self.plaquette
+                    )
 
-            return i + 1, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution
+            return i + 1, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution, plaquette_evolution
 
         i = tf.constant(0)
-        _, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution = tf.while_loop(
+        _, spin_evolution, energy_evolution, magnetization_evolution, overlap_evolution, plaquette_evolution = tf.while_loop(
             lambda i, *_: i < sweep_length,
             body,
             loop_vars=[i, spin_evolution,
-                       energy_evolution, magnetization_evolution, overlap_evolution],
+                       energy_evolution, magnetization_evolution, overlap_evolution, plaquette_evolution],
         )
 
         result = {}
@@ -483,6 +667,8 @@ class SpinSystem(tf.Module):
             result["magnetization_evolution"] = magnetization_evolution.stack()
         if track_overlap:
             result["overlap_evolution"] = overlap_evolution.stack()
+        if track_plaquette:
+            result["plaquette_evolution"] = plaquette_evolution.stack()
 
         return result
 
@@ -497,13 +683,13 @@ class SpinSystem(tf.Module):
         track_spins: bool = False,
         track_energy: bool = False,
         track_magnetization: bool = True,
-        track_overlap: bool = True
+        track_overlap: bool = True,
+        track_plaquette: bool = False
     ):
         """
         Perform independent Metropolis sweeps for multiple inverse temperatures (betas).
-        Returns:
-            dict with keys 'spin_evolution', 'energy_evolution', 'magnetization_evolution',
-            each stacked along the first dimension corresponding to beta index.
+        Returns a dict with evolution of tracked quantities stacked along the first dimension
+        corresponding to beta index.
         """
         betas = tf.convert_to_tensor(betas, dtype=tf.float32)
         n_temps = tf.shape(betas)[0]
@@ -515,15 +701,15 @@ class SpinSystem(tf.Module):
         energy_array = make_array(track_energy, n_temps)
         mag_array = make_array(track_magnetization, n_temps)
         overlap_array = make_array(track_overlap, n_temps)
+        plaquette_array = make_array(track_plaquette, n_temps)
 
-        def body(i, spin_array, energy_array, mag_array, overlap_array):
+        def body(i, spin_array, energy_array, mag_array, overlap_array, plaquette_array):
             beta = betas[i]
 
-            # Save original spin state
-            if restore_initial_state == True:
+            if restore_initial_state:
                 original_spin_state = tf.identity(self.spin_state)
 
-            # Run a full sweep
+            # Run full sweep
             results = self.metropolis_sweep(
                 beta=beta,
                 num_disturb=num_disturb,
@@ -532,7 +718,8 @@ class SpinSystem(tf.Module):
                 track_spins=track_spins,
                 track_energy=track_energy,
                 track_magnetization=track_magnetization,
-                track_overlap=track_overlap
+                track_overlap=track_overlap,
+                track_plaquette=track_plaquette,
             )
 
             if track_spins:
@@ -546,17 +733,21 @@ class SpinSystem(tf.Module):
             if track_overlap:
                 overlap_array = overlap_array.write(
                     i, results["overlap_evolution"])
+            if track_plaquette:
+                plaquette_array = plaquette_array.write(
+                    i, results["plaquette_evolution"])
 
-            if restore_initial_state == True:
+            if restore_initial_state:
                 self.spin_state.assign(original_spin_state)
 
-            return i + 1, spin_array, energy_array, mag_array, overlap_array
+            return i + 1, spin_array, energy_array, mag_array, overlap_array, plaquette_array
 
         i0 = tf.constant(0)
-        _, spin_array, energy_array, mag_array, overlap_array = tf.while_loop(
+        _, spin_array, energy_array, mag_array, overlap_array, plaquette_array = tf.while_loop(
             lambda i, *_: i < n_temps,
             body,
-            loop_vars=[i0, spin_array, energy_array, mag_array, overlap_array],
+            loop_vars=[i0, spin_array, energy_array,
+                       mag_array, overlap_array, plaquette_array],
         )
 
         result = {"betas": betas}
@@ -568,5 +759,7 @@ class SpinSystem(tf.Module):
             result["magnetization_evolution"] = mag_array.stack()
         if track_overlap:
             result["overlap_evolution"] = overlap_array.stack()
+        if track_plaquette:
+            result["plaquette_evolution"] = plaquette_array.stack()
 
         return result
