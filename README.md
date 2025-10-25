@@ -57,7 +57,21 @@ Energy changes are computed efficiently using local field updates and explicit m
 - User-defined interaction matrices and external fields.
 - Observable tracking: energy, magnetization, overlap matrix, plaquette values, Wilson loops (for gauge models).
 - Multi-temperature sweeps for studying phase transitions.
+- **Parallel programming and GPU acceleration** via TensorFlow for high-performance simulations.
 - TensorFlow-based for efficient computation and automatic differentiation.
+
+---
+
+## Project Status
+
+**This project is a work in progress.**  
+Features, APIs, and documentation may change. Contributions and feedback are welcome.
+
+---
+
+## Maintainer
+
+- [Lucas Gomes de Oliveira Corbanez](https://github.com/Corbanez97)
 
 ---
 
@@ -75,7 +89,3 @@ Energy changes are computed efficiently using local field updates and explicit m
 - Sandvik, A. W. (2010). Computational Studies of Quantum Spin Systems.
 - Altieri, A. (2024). Introduction to the Theory of Spin Glasses.
 - Bienzobaz, P. (2012). Quantização Canônica e Integração Funcional.
-
----
-
-For more details and examples, see the [project repository](https://github.com/Corbanez97/spherical-model).
